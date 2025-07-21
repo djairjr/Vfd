@@ -27,7 +27,9 @@ public:
   virtual void readMotorStatus() = 0;
   
     // Utility helpers (shared by all subclasses)
+  virtual void checkModbusAddress();
   bool verifyModbusConnection();
+  bool resetFault();
   bool readModbusRegister(uint16_t reg, uint16_t* value);
   bool writeModbusRegister(uint16_t reg, uint16_t value);
 

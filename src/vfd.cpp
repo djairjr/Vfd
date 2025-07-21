@@ -46,6 +46,19 @@ bool VFD::verifyModbusConnection() {
   return lastStatus;
 }
 
+void VFD::checkModbusAddress() {
+  uint16_t value;
+  if (readModbusRegister(6001, &value)) {
+    Serial.print("Endereço MODBUS atual: ");
+    Serial.println(value);
+  }
+}
+
+bool VFD::resetFault() {
+	return sendCommandWithRetry(CMD_RESET_FAULT);
+}
+
+
 // ---------- Schneider ATV12 ----------
 SchneiderATV12::SchneiderATV12(ModbusMaster* node, uint8_t address)
   : VFD(node, address) {

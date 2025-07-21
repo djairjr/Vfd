@@ -30,7 +30,7 @@ An Arduino library for controlling various Variable Frequency Drive (VFD) models
 2. **PlatformIO**:
    ```ini
    lib_deps = 
-       https://github.com/yourusername/vfd-control.git
+       https://github.com/djairjr/Vfd.git
    ```
 
 ## Dependencies
@@ -63,7 +63,7 @@ ModbusMaster node;
 SchneiderATV12 vfd(&node, 1); // Address = 1
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200); // USB Debug Serial
   Serial2.begin(19200); // Modbus communication
   
   vfd.readFrequencyLimits(); // Read min/max frequencies

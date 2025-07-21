@@ -25,6 +25,11 @@ public:
   virtual bool sendCommandWithRetry(uint16_t command) = 0;
   virtual void readFrequencyLimits() = 0;
   virtual void readMotorStatus() = 0;
+  
+    // Utility helpers (shared by all subclasses)
+  bool verifyModbusConnection();
+  bool readModbusRegister(uint16_t reg, uint16_t* value);
+  bool writeModbusRegister(uint16_t reg, uint16_t value);
 
   uint16_t getMotorSpeed() const { return motorSpeed; }
   uint16_t getMotorStatus() const { return motorStatus; }

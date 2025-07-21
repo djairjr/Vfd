@@ -5,6 +5,47 @@ VFD::VFD(ModbusMaster* node, uint8_t address)
   node->begin(address, Serial2);
 }
 
+// ------------------------------------------------------------------
+//  Generic helpers – used by ALL subclasses
+// ------------------------------------------------------------------
+bool VFD::readModbusRegister(uint16_t reg, uint16_t* value) {
+  unsigned long start = millis();
+  uint8_t res;
+  uint8_t att = 0;
+  do {
+    res = node->readHoldingRegisters(reg, 1);
+    if (res == node->ku8MBSuccess) {
+      *value = node->getResponseBuffer(0);
+      return true;
+    }
+    delay(50);
+  } while (millis() - start < 2000);   // MODBUS_RESPONSE_TIMEOUT
+  return false;
+}
+
+bool VFD::writeModbusRegister(uint16_t reg, uint16_t value) {
+  unsigned long start = millis();
+  uint8_t res;
+  do {
+    res = node->writeSingleRegister(reg, value);
+    if (res == node->ku8MBSuccess) return true;
+    delay(50);
+  } while (millis() - start < 2000);
+  return false;
+}
+
+bool VFD::verifyModbusConnection() {
+  static uint32_t lastCheck = 0;
+  static bool lastStatus = false;
+  if (millis() - lastCheck < 2000) return lastStatus;
+
+  lastCheck = millis();
+  uint16_t dummy;
+  lastStatus = readModbusRegister(MB_STATUS_REG, &dummy);
+  if (!lastStatus) node->begin(address, Serial2);
+  return lastStatus;
+}
+
 // ---------- Schneider ATV12 ----------
 SchneiderATV12::SchneiderATV12(ModbusMaster* node, uint8_t address)
   : VFD(node, address) {

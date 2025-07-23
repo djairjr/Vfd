@@ -1,13 +1,79 @@
-/*'''''''''''''''/*
+/*
    Interface completa DMX -> MODBUS
    -----------------------------------
    Def.: Permite o controle de um Motor trifásico WEG W22,
    utilizando um inversor de fase Schneider ATV12 com interface
    MODBUS feita por um Arduino Mega, com dois módulos RS485
+
+   Criado por Djair Guilherme em Junho de 2025 para o espetáculo
+   Macuco, da Digna Companhia, que necessitava de um controle
+   do dispositivo a partir de uma mesa de luz DMX convencional;
+
+   PARÂMETROS DO MOTOR WEG W22 (220V)
+   -----------------------------------
+   Motor de 3KW(HP-cv) 0.25 (0.33)
+   (nSP) 1720 RPM  - (FrS) 60Hz
+   Tensão Nominal (Uns): 220V
+   Corrente Nominal (nCr): 1.65A
+   Corrente de sobrecarga (SFA): 1.9A
+   Fator de Potência: (Ncr) 0.25kW
+   Fator Potência: (Cos) 0.64
+   FSSF 1.15
+
+   CONFIGURANDO PARÂMETROS DO MOTOR NO ATV12H037M2
+   -----------------------------------
+   Conf -> Full -> DrC- (Configuração do Motor):
+   BFR 60
+   NPR 0.2
+   UNS 220
+   NCR 1.6
+   FRS 60
+   NSP 1720 (Só aparece se NPC estiver como NPR)
+   TFR 60 (default 72)
+   CTT PERF
+   UFR 100
+   SLP 100
+   STA 20
+   FLG 20
+   SFT HF1
+   SFR 8.0 (Default 4.0 khz - Redução do ruído agudo)
+   NRD YES (Redução de ruído agudo)
+   TUN NO
+   NPC NPR/COS
+   COS 0.64 (Só aparece se NPC estiver como COS)
+
+   CONFIGURANDO PARÂMETROS DE PROTEÇÃO TÉRMICA NO ATV12H037M2
+   -----------------------------------
+   FLT -> THT
+   ITH 1.9
+
+   CONFIGURANDO RAMPAS E VELOCIDADES NO ATV12H037M2
+   -----------------------------------
+   Conf ->
+   ACC 3.0
+   DEC 1.0
+   LSP 0.0
+   HSP 60.0
+
+   CONFIGURANDO PARÂMETROS DE COMUNICAÇÃO MODBUS NO ATV12H037M2
+   -----------------------------------
+   Conf -> Full -> COM (Comunicação):
+   ADD (Endereço Modbus): 1 (ou o desejado)
+   TBR (Baud rate): 19.2 kbps (valor 19)
+   TFO (Formato): 8E1 (valor 1)
+   TTO (Timeout): 2.0 s (valor 20) padrão da Biblioteca ModbusMaster
+
+   CONFIGURANDO CONTROLE POR MODBUS NO ATV12H037M2
+   -----------------------------------
+   Conf -> Full -> CTL (Comandos):
+   CHCF: Sep
+   CD1: Modbus
+   FR1: Modbus
+
 */
 #include <esp_dmx.h>
-#include <Preferences.h>
 #include <ModbusMaster.h>
+#include <Preferences.h>
 #include <ESP32Encoder.h>
 #include <Wire.h>
 #include <TFT_eSPI.h>
@@ -16,6 +82,14 @@
 
 TFT_eSPI tft = TFT_eSPI();
 #define TFT_BL 4
+
+/*=============================  MODBUS  =============================*/
+#define MODBUS_RESPONSE_TIMEOUT 2000   // ms
+#define STATE_TRANSITION_DELAY  500    // ms
+#define MODBUS_TX 15
+#define MODBUS_RX 17
+
+ModbusMaster node;
 
 /*=============================  DMX  =============================*/
 dmx_port_t dmxPort = DMX_NUM_1;
@@ -38,13 +112,6 @@ uint8_t lastDmxTenths    = 0;
 
 bool dmxOnline = false;
 uint8_t dmxData[DMX_PACKET_SIZE];
-
-/*=============================  MODBUS  =============================*/
-#define MODBUS_RESPONSE_TIMEOUT 2000   // ms
-#define STATE_TRANSITION_DELAY  500    // ms
-#define MODBUS_TX 15
-#define MODBUS_RX 17
-ModbusMaster node;
 
 /*=============================  ENCODER  =============================*/
 #define DT_ENCODER 25
@@ -178,8 +245,12 @@ void setup() {
   readDMX(); // Added to update DMX values at boot
 
   // MODBUS
-  Serial2.begin(19200, SERIAL_8E1, MODBUS_TX, MODBUS_RX);
+  Serial2.begin(19200, SERIAL_8E1, MODBUS_RX, MODBUS_TX); // RX first TX second
   node.begin(1, Serial2);
+  Serial.println("Checando conexão MODBUS");
+  vfd.checkModbusAddress();
+  vfd.verifyModbusConnection();
+  vfd.resetFault();
 
   // VFD
   vfd.readFrequencyLimits();
@@ -197,6 +268,7 @@ void loop() {
   checkEncoder();
 
   if (now - lastUpdate >= 20) {
+    // Check Inverter Config
     if (configStep == IDLE && readEncoderButton()) {
       configStep = SELECT_INVERTER;
       encoder.clearCount();
@@ -204,7 +276,7 @@ void loop() {
       lastUpdate = now;
       return;
     }
-
+    // Check DMX first Channel
     if (configStep == SELECT_INVERTER && readEncoderButton()) {
       configStep = SELECT_CHANNEL;
       encoder.clearCount();
@@ -213,7 +285,7 @@ void loop() {
       lastUpdate = now;
       return;
     }
-
+    // Save both Configs
     if (configStep == SELECT_CHANNEL && readEncoderButton()) {
       prefs.begin("dmx-config", false);
       prefs.putUChar("inverter", inverterBrand);
@@ -223,7 +295,7 @@ void loop() {
       lastUpdate = now;
       return;
     }
-
+    // Not config. Read DMX, if changed, processDMXCommands and Update Display
     if (configStep == IDLE) {
       readDMX();
       if (dmxChanged()) {
@@ -232,12 +304,17 @@ void loop() {
         lastDmxSpeed     = dmxSpeed;
         lastDmxTenths    = dmxTenths;
         processDMXCommands();
-        vfd.readMotorStatus();
         updateDisplayData();
       }
     }
-    
-    
+    // Constantly Check Motor Status at 0,5s
+    static unsigned long lastStatusRead = 0;
+    if (now - lastStatusRead > 500) {
+      vfd.readMotorStatus();
+      lastStatusRead = now;
+      // updateDisplayData();
+    }
+
     lastUpdate = now;
   }
 }
@@ -272,34 +349,65 @@ bool dmxChanged() {
 }
 
 void processDMXCommands() {
-  bool enableMotor = (dmxEnable >= 128);
+  // ------------------------------------------------------------------
+  // 0. Sanity checks
+  // ------------------------------------------------------------------
+  if (!vfd.verifyModbusConnection()) {
+    Serial.println("Erro: Sem comunicação MODBUS - Verifique ATV12");
+    return;
+  }
+  vfd.readFrequencyLimits();
+
+  // ------------------------------------------------------------------
+  // 1. Decode DMX values
+  // ------------------------------------------------------------------
+  bool enableMotor = (dmxEnable >= 128); // if first channel is equal or bigger 128, activate motor
+
   uint16_t targetSpeed = 0;
-
-  if (enableMotor) {
+  if (enableMotor) { // if motor active
     static uint8_t lastSpeed = 0, lastTenths = 0;
-    uint8_t speedVal = (dmxSpeed * 61) / 256;
-    if (abs(speedVal - lastSpeed) >= 1 || dmxSpeed == 0 || dmxSpeed == 255) lastSpeed = speedVal;
-    uint8_t tenthsVal = (dmxTenths * 10) / 256;
-    if (abs(tenthsVal - lastTenths) >= 1 || dmxTenths == 0 || dmxTenths == 255) lastTenths = tenthsVal;
 
-    targetSpeed = constrain(lastSpeed, 0, 60) * 10 + constrain(lastTenths, 0, 9);
-    targetSpeed = constrain(targetSpeed, vfd.getMinFrequency(), vfd.getMaxFrequency());
+    uint8_t speedVal = (dmxSpeed * 61) / 256; // Integer part of Speed
+    if (abs(speedVal - lastSpeed) >= 1 || dmxSpeed == 0 || dmxSpeed == 255)
+      lastSpeed = speedVal;
+
+    uint8_t tenthsVal = (dmxTenths * 10) / 256; // Decimal part of Speed
+    if (abs(tenthsVal - lastTenths) >= 1 || dmxTenths == 0 || dmxTenths == 255)
+      lastTenths = tenthsVal;
+
+    targetSpeed = constrain(lastSpeed, 0, 60) * 10 + constrain(lastTenths, 0, 9); // Set new speed
+    targetSpeed = constrain(targetSpeed, vfd.getMinFrequency(), vfd.getMaxFrequency()); // Constrain in limits
   }
 
-  bool newDir = (dmxDirection >= 128);
-  bool dirChanged = newDir != (vfd.getMotorDirection() == 1);
+  bool newDir      = (dmxDirection >= 128); // if second channel is equal or bigger than 128, change direction
+  bool dirChanged  = newDir != (vfd.getMotorDirection() == 1);
 
   uint16_t st = vfd.getMotorStatus() & 0x004F;
 
+  // ------------------------------------------------------------------
+  // 2. Fault handling
+  // ------------------------------------------------------------------
   if (st == STATE_FAULT) {
-    vfd.sendCommandWithRetry(CMD_RESET_FAULT);
+    if (!vfd.resetFault()) {
+      Serial.println("Falha: Reset de falha não realizado");
+      return;
+    }
     delay(1000);
     vfd.readMotorStatus();
-    return;
+    st = vfd.getMotorStatus() & 0x004F;   // refresh
   }
 
-  vfd.setMotorSpeed(targetSpeed);
-
+  // ------------------------------------------------------------------
+  // 3. Speed & direction
+  // ------------------------------------------------------------------
+  vfd.setMotorSpeed(targetSpeed);          // envia velocidade
+  if (!vfd.setMotorDirection(newDir))      // ajusta direção
+    Serial.println("Aviso: falha ao ajustar direção");
+  delay(50); // Added to give time for direction change...
+  
+  // ------------------------------------------------------------------
+  // 4. State machine
+  // ------------------------------------------------------------------
   if (!enableMotor) {
     switch (st) {
       case STATE_OPERATION_ENABLED:
@@ -311,38 +419,42 @@ void processDMXCommands() {
         vfd.sendCommandWithRetry(CMD_SHUTDOWN);
         break;
     }
-    return;
   }
 
   if (dirChanged && st == STATE_OPERATION_ENABLED) {
     vfd.sendCommandWithRetry(CMD_DISABLE_OPERATION);
     delay(500);
+    st = vfd.getMotorStatus() & 0x004F;   // refresh
   }
+  if (enableMotor) {
 
-  vfd.setMotorDirection(newDir);
+    switch (st) {
+      case STATE_SWITCH_DISABLED:
+        vfd.sendCommandWithRetry(CMD_SHUTDOWN);
+        delay(STATE_TRANSITION_DELAY);
+        vfd.sendCommandWithRetry(CMD_SWITCH_ON);
+        delay(STATE_TRANSITION_DELAY);
+        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+        break;
 
-  switch (st) {
-    case STATE_SWITCH_DISABLED:
-      vfd.sendCommandWithRetry(CMD_SHUTDOWN);
-      delay(STATE_TRANSITION_DELAY);
-      vfd.sendCommandWithRetry(CMD_SWITCH_ON);
-      delay(STATE_TRANSITION_DELAY);
-      vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-      break;
-    case STATE_READY:
-      vfd.sendCommandWithRetry(CMD_SWITCH_ON);
-      delay(STATE_TRANSITION_DELAY);
-      vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-      break;
-    case STATE_SWITCHED_ON:
-      vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-      break;
-    case STATE_OPERATION_ENABLED:
-      if (dirChanged) vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-      break;
+      case STATE_READY:
+        vfd.sendCommandWithRetry(CMD_SWITCH_ON);
+        delay(STATE_TRANSITION_DELAY);
+        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+        break;
+
+      case STATE_SWITCHED_ON:
+        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+        break;
+
+      case STATE_OPERATION_ENABLED:
+        if (dirChanged) {
+          vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+        }
+        break;
+    }
   }
 }
-
 /*======================================================================*/
 /*                           ENCODER / CONFIG                           */
 /*======================================================================*/
@@ -462,7 +574,7 @@ void updateDisplayData() {
 
   tft.setCursor(xValue, ySt - 8);
   tft.print("MODBUS");
-  tft.fillCircle(xValue + 72, ySt - 2, r, vfd.getMotorStatus() != 0 ? TFT_GREEN : TFT_RED);
+  tft.fillCircle(xValue + 72, ySt - 2, r,   vfd.verifyModbusConnection() != 0 ? TFT_GREEN : TFT_RED);
 
   // Inverter status
   int inverterY = ySt + 5;  // 20px abaixo dos status de DMX e MODBUS

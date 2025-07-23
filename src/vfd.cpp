@@ -9,40 +9,54 @@ VFD::VFD(ModbusMaster* node, uint8_t address)
 //  Generic helpers – used by ALL subclasses
 // ------------------------------------------------------------------
 bool VFD::readModbusRegister(uint16_t reg, uint16_t* value) {
-  unsigned long start = millis();
-  uint8_t res;
-  uint8_t att = 0;
+  unsigned long startTime = millis();
+  uint8_t result;
+  uint8_t attempts = 0;
+
   do {
-    res = node->readHoldingRegisters(reg, 1);
-    if (res == node->ku8MBSuccess) {
+    attempts++;
+    result = node->readHoldingRegisters(reg, 1);
+
+    if (result == node->ku8MBSuccess) {
       *value = node->getResponseBuffer(0);
       return true;
     }
+
     delay(50);
-  } while (millis() - start < 2000);   // MODBUS_RESPONSE_TIMEOUT
+  } while (millis() - startTime < MODBUS_RESPONSE_TIMEOUT);
+
   return false;
 }
 
 bool VFD::writeModbusRegister(uint16_t reg, uint16_t value) {
-  unsigned long start = millis();
-  uint8_t res;
+  unsigned long startTime = millis();
+  uint8_t result;
+
   do {
-    res = node->writeSingleRegister(reg, value);
-    if (res == node->ku8MBSuccess) return true;
+    result = node->writeSingleRegister(reg, value);
+    if (result == node->ku8MBSuccess) {
+      return true;
+    }
     delay(50);
-  } while (millis() - start < 2000);
+  } while (millis() - startTime < MODBUS_RESPONSE_TIMEOUT);
+
   return false;
 }
 
 bool VFD::verifyModbusConnection() {
   static uint32_t lastCheck = 0;
   static bool lastStatus = false;
-  if (millis() - lastCheck < 2000) return lastStatus;
+
+  if (millis() - lastCheck < MODBUS_RESPONSE_TIMEOUT) return lastStatus;
 
   lastCheck = millis();
-  uint16_t dummy;
-  lastStatus = readModbusRegister(MB_STATUS_REG, &dummy);
-  if (!lastStatus) node->begin(address, Serial2);
+  uint16_t value;
+  lastStatus = readModbusRegister(MB_STATUS_REG, &value);
+
+  if (!lastStatus) {
+    node->begin(address, Serial2);
+  }
+
   return lastStatus;
 }
 
@@ -55,9 +69,8 @@ void VFD::checkModbusAddress() {
 }
 
 bool VFD::resetFault() {
-	return sendCommandWithRetry(CMD_RESET_FAULT);
+  return sendCommandWithRetry(CMD_RESET_FAULT);
 }
-
 
 // ---------- Schneider ATV12 ----------
 SchneiderATV12::SchneiderATV12(ModbusMaster* node, uint8_t address)
@@ -73,42 +86,69 @@ SchneiderATV12::SchneiderATV12(ModbusMaster* node, uint8_t address)
 }
 
 bool SchneiderATV12::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool SchneiderATV12::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool SchneiderATV12::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void SchneiderATV12::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_HIGH_SPEED_REG, 1);
-  highSpeed = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin, newHigh;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+    success &= readModbusRegister(MB_HIGH_SPEED_REG, &newHigh);
+
+    if (success && newMin < newMax && newHigh <= newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+      highSpeed = newHigh;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void SchneiderATV12::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }
 
@@ -125,40 +165,67 @@ SiemensV20::SiemensV20(ModbusMaster* node, uint8_t address)
 }
 
 bool SiemensV20::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool SiemensV20::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool SiemensV20::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void SiemensV20::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+
+    if (success && newMin < newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void SiemensV20::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }
 
@@ -175,40 +242,67 @@ WEGCFW500::WEGCFW500(ModbusMaster* node, uint8_t address)
 }
 
 bool WEGCFW500::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool WEGCFW500::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool WEGCFW500::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void WEGCFW500::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+
+    if (success && newMin < newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void WEGCFW500::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }
 
@@ -225,40 +319,67 @@ ABBACS550::ABBACS550(ModbusMaster* node, uint8_t address)
 }
 
 bool ABBACS550::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool ABBACS550::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool ABBACS550::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void ABBACS550::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+
+    if (success && newMin < newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void ABBACS550::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }
 
@@ -275,40 +396,67 @@ DanfossFC302::DanfossFC302(ModbusMaster* node, uint8_t address)
 }
 
 bool DanfossFC302::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool DanfossFC302::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool DanfossFC302::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void DanfossFC302::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+
+    if (success && newMin < newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void DanfossFC302::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }
 
@@ -325,39 +473,66 @@ YaskawaV1000::YaskawaV1000(ModbusMaster* node, uint8_t address)
 }
 
 bool YaskawaV1000::setMotorSpeed(uint16_t speed) {
-  return node->writeSingleRegister(MB_SPEED_REG, speed);
+  return writeModbusRegister(MB_SPEED_REG, speed);
 }
 
 bool YaskawaV1000::setMotorDirection(uint16_t direction) {
   uint16_t currentCmd;
-  if (!node->readHoldingRegisters(MB_CMD_REG, 1)) return false;
-  currentCmd = node->getResponseBuffer(0);
-  if (direction) currentCmd |= (1 << 11);
-  else currentCmd &= ~(1 << 11);
-  return node->writeSingleRegister(MB_CMD_REG, currentCmd);
+  if (!readModbusRegister(MB_CMD_REG, &currentCmd)) return false;
+
+  if (direction) {
+    currentCmd |= (1 << 11);
+  } else {
+    currentCmd &= ~(1 << 11);
+  }
+
+  return writeModbusRegister(MB_CMD_REG, currentCmd);
 }
 
 bool YaskawaV1000::sendCommandWithRetry(uint16_t command) {
   for (uint8_t i = 0; i < 3; i++) {
-    if (node->writeSingleRegister(MB_CMD_REG, command)) return true;
+    if (writeModbusRegister(MB_CMD_REG, command)) {
+      return true;
+    }
     delay(100);
   }
   return false;
 }
 
 void YaskawaV1000::readFrequencyLimits() {
-  node->readHoldingRegisters(MB_MAX_FREQ_REG, 1);
-  maxFrequency = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_MIN_FREQ_REG, 1);
-  minFrequency = node->getResponseBuffer(0);
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000;
+
+  if (millis() - lastCheck > checkInterval) {
+    uint16_t newMax, newMin;
+    bool success = true;
+
+    success &= readModbusRegister(MB_MAX_FREQ_REG, &newMax);
+    success &= readModbusRegister(MB_MIN_FREQ_REG, &newMin);
+
+    if (success && newMin < newMax) {
+      minFrequency = newMin;
+      maxFrequency = newMax;
+    }
+
+    lastCheck = millis();
+  }
 }
 
 void YaskawaV1000::readMotorStatus() {
-  node->readHoldingRegisters(MB_STATUS_REG, 1);
-  motorStatus = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ACTUAL_SPEED_REG, 1);
-  motorSpeed = node->getResponseBuffer(0);
-  node->readHoldingRegisters(MB_ERRORS_REG, 1);
-  motorErrors = node->getResponseBuffer(0);
+  uint16_t value;
+
+  if (readModbusRegister(MB_STATUS_REG, &value)) {
+    motorStatus = value;
+  }
+
+  if (readModbusRegister(MB_ACTUAL_SPEED_REG, &value)) {
+    motorSpeed = value;
+  }
+
+  if (readModbusRegister(MB_ERRORS_REG, &value)) {
+    motorErrors = value;
+  }
+
   motorDirection = (motorStatus & 0x8000) ? 1 : 0;
 }

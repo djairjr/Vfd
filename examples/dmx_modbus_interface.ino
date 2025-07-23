@@ -229,7 +229,7 @@ void setup() {
   tft.setTextFont(2);           // Fonte menor para o subtítulo
   tft.setTextColor(TFT_WHITE);
   tft.drawString("@nicolaudosbrinquedos", tft.width() / 2, 70);
-  delay(500);
+  delay(1000);
 
   // EEPROM
   prefs.begin("dmx-config", false);
@@ -242,7 +242,8 @@ void setup() {
   dmx_config_t cfg = DMX_CONFIG_DEFAULT;
   dmx_driver_install(dmxPort, &cfg, NULL, 0);
   dmx_set_pin(dmxPort, DMX_TX1_PIN, DMX_RX1_PIN, DMX_PIN_NO_CHANGE);
-  readDMX(); // Added to update DMX values at boot
+  // readDMX(); // Added to update DMX values at boot
+  delay(500);
 
   // MODBUS
   Serial2.begin(19200, SERIAL_8E1, MODBUS_RX, MODBUS_TX); // RX first TX second
@@ -250,12 +251,15 @@ void setup() {
   Serial.println("Checando conexão MODBUS");
   vfd.checkModbusAddress();
   vfd.verifyModbusConnection();
-  vfd.resetFault();
+  delay(500);
+  // vfd.resetFault();
 
   // VFD
+  Serial.println ("Read Frequency Limits and Motor Status");
   vfd.readFrequencyLimits();
   vfd.readMotorStatus();
   updateDisplayData();
+  delay(500);
 }
 
 /*======================================================================*/
@@ -267,7 +271,7 @@ void loop() {
 
   checkEncoder();
 
-  if (now - lastUpdate >= 20) {
+  if (now - lastUpdate >= 50) { // 20ms é muito rápido para o ATV12
     // Check Inverter Config
     if (configStep == IDLE && readEncoderButton()) {
       configStep = SELECT_INVERTER;
@@ -307,15 +311,6 @@ void loop() {
         updateDisplayData();
       }
     }
-    // Constantly Check Motor Status at 0,5s
-    static unsigned long lastStatusRead = 0;
-    if (now - lastStatusRead > 500) {
-      vfd.readMotorStatus();
-      lastStatusRead = now;
-      // updateDisplayData();
-    }
-
-    lastUpdate = now;
   }
 }
 
@@ -357,104 +352,125 @@ void processDMXCommands() {
     return;
   }
   vfd.readFrequencyLimits();
+  vfd.readMotorStatus(); // Atualiza o status primeiro!
 
   // ------------------------------------------------------------------
   // 1. Decode DMX values
   // ------------------------------------------------------------------
-  bool enableMotor = (dmxEnable >= 128); // if first channel is equal or bigger 128, activate motor
-
+  bool enableMotor = (dmxEnable >= 128);
   uint16_t targetSpeed = 0;
-  if (enableMotor) { // if motor active
-    static uint8_t lastSpeed = 0, lastTenths = 0;
 
-    uint8_t speedVal = (dmxSpeed * 61) / 256; // Integer part of Speed
-    if (abs(speedVal - lastSpeed) >= 1 || dmxSpeed == 0 || dmxSpeed == 255)
-      lastSpeed = speedVal;
+  if (enableMotor) {
+    // Processamento do Canal 3 (velocidade inteira 0-60)
+    static uint8_t lastSpeedValue = 0;
+    uint8_t newSpeedValue = (dmxSpeed * 61) / 256;
 
-    uint8_t tenthsVal = (dmxTenths * 10) / 256; // Decimal part of Speed
-    if (abs(tenthsVal - lastTenths) >= 1 || dmxTenths == 0 || dmxTenths == 255)
-      lastTenths = tenthsVal;
+    if (abs(newSpeedValue - lastSpeedValue) >= 1 || dmxSpeed == 0 || dmxSpeed == 255) {
+      lastSpeedValue = newSpeedValue;
+    }
+    uint8_t speedValue = constrain(lastSpeedValue, 0, 60);
 
-    targetSpeed = constrain(lastSpeed, 0, 60) * 10 + constrain(lastTenths, 0, 9); // Set new speed
-    targetSpeed = constrain(targetSpeed, vfd.getMinFrequency(), vfd.getMaxFrequency()); // Constrain in limits
+    // Processamento do Canal 4 (décimos 0-9)
+    static uint8_t lastTenthsValue = 0;
+    uint8_t newTenthsValue = (dmxTenths * 10) / 256;
+
+    if (abs(newTenthsValue - lastTenthsValue) >= 1 || dmxTenths == 0 || dmxTenths == 255) {
+      lastTenthsValue = newTenthsValue;
+    }
+    uint8_t tenthsValue = constrain(lastTenthsValue, 0, 9);
+
+    targetSpeed = (speedValue * 10) + tenthsValue;
+    targetSpeed = constrain(targetSpeed, vfd.getMinFrequency(), vfd.getMaxFrequency());
   }
 
-  bool newDir      = (dmxDirection >= 128); // if second channel is equal or bigger than 128, change direction
-  bool dirChanged  = newDir != (vfd.getMotorDirection() == 1);
+  bool newDirection = (dmxDirection >= 128);
+  bool directionChanged = newDirection != (vfd.getMotorDirection() == 1);
 
-  uint16_t st = vfd.getMotorStatus() & 0x004F;
+  // Debug
+  Serial.print("DMX Values - Enable: "); Serial.print(dmxEnable);
+  Serial.print(", Direction: "); Serial.print(dmxDirection);
+  Serial.print(", Speed: "); Serial.print(dmxSpeed);
+  Serial.print(", Tenths: "); Serial.println(dmxTenths);
+  Serial.print("Target Speed: "); Serial.print(targetSpeed / 10); 
+  Serial.print("."); Serial.print(targetSpeed % 10); Serial.println(" Hz");
 
   // ------------------------------------------------------------------
   // 2. Fault handling
   // ------------------------------------------------------------------
-  if (st == STATE_FAULT) {
+  if ((vfd.getMotorStatus() & 0x004F) == STATE_FAULT) {
     if (!vfd.resetFault()) {
       Serial.println("Falha: Reset de falha não realizado");
       return;
     }
     delay(1000);
     vfd.readMotorStatus();
-    st = vfd.getMotorStatus() & 0x004F;   // refresh
   }
 
   // ------------------------------------------------------------------
-  // 3. Speed & direction
+  // 3. Speed control (independente do estado)
   // ------------------------------------------------------------------
-  vfd.setMotorSpeed(targetSpeed);          // envia velocidade
-  if (!vfd.setMotorDirection(newDir))      // ajusta direção
-    Serial.println("Aviso: falha ao ajustar direção");
-  delay(50); // Added to give time for direction change...
-  
+  if (!vfd.setMotorSpeed(targetSpeed)) {
+    Serial.println("Erro: Velocidade não configurada");
+  }
+
   // ------------------------------------------------------------------
   // 4. State machine
   // ------------------------------------------------------------------
   if (!enableMotor) {
-    switch (st) {
+    switch (vfd.getMotorStatus() & 0x004F) {
       case STATE_OPERATION_ENABLED:
         vfd.sendCommandWithRetry(CMD_DISABLE_OPERATION);
         delay(STATE_TRANSITION_DELAY);
         vfd.sendCommandWithRetry(CMD_SHUTDOWN);
         break;
+
       case STATE_SWITCHED_ON:
         vfd.sendCommandWithRetry(CMD_SHUTDOWN);
         break;
     }
+    return;
   }
 
-  if (dirChanged && st == STATE_OPERATION_ENABLED) {
+  // Se motor habilitado, tratar direção e estado
+  if (directionChanged && (vfd.getMotorStatus() & 0x004F) == STATE_OPERATION_ENABLED) {
     vfd.sendCommandWithRetry(CMD_DISABLE_OPERATION);
     delay(500);
-    st = vfd.getMotorStatus() & 0x004F;   // refresh
+    vfd.readMotorStatus(); // Atualiza status após mudança
   }
-  if (enableMotor) {
 
-    switch (st) {
-      case STATE_SWITCH_DISABLED:
-        vfd.sendCommandWithRetry(CMD_SHUTDOWN);
-        delay(STATE_TRANSITION_DELAY);
-        vfd.sendCommandWithRetry(CMD_SWITCH_ON);
-        delay(STATE_TRANSITION_DELAY);
-        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-        break;
-
-      case STATE_READY:
-        vfd.sendCommandWithRetry(CMD_SWITCH_ON);
-        delay(STATE_TRANSITION_DELAY);
-        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-        break;
-
-      case STATE_SWITCHED_ON:
-        vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-        break;
-
-      case STATE_OPERATION_ENABLED:
-        if (dirChanged) {
-          vfd.sendCommandWithRetry(newDir ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
-        }
-        break;
-    }
+  // Configura direção (deve vir antes dos comandos de estado)
+  if (!vfd.setMotorDirection(newDirection)) {
+    Serial.println("Aviso: falha ao ajustar direção");
   }
-  vfd.readMotorStatus(); // update motor status
+
+  // Máquina de estados principal
+  switch (vfd.getMotorStatus() & 0x004F) {
+    case STATE_SWITCH_DISABLED:
+      vfd.sendCommandWithRetry(CMD_SHUTDOWN);
+      delay(STATE_TRANSITION_DELAY);
+      vfd.sendCommandWithRetry(CMD_SWITCH_ON);
+      delay(STATE_TRANSITION_DELAY);
+      vfd.sendCommandWithRetry(newDirection ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+      break;
+
+    case STATE_READY:
+      vfd.sendCommandWithRetry(CMD_SWITCH_ON);
+      delay(STATE_TRANSITION_DELAY);
+      vfd.sendCommandWithRetry(newDirection ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+      break;
+
+    case STATE_SWITCHED_ON:
+      vfd.sendCommandWithRetry(newDirection ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+      break;
+
+    case STATE_OPERATION_ENABLED:
+      if (directionChanged) {
+        vfd.sendCommandWithRetry(newDirection ? CMD_RUN_REVERSE : CMD_RUN_FORWARD);
+      }
+      break;
+  }
+
+  vfd.readMotorStatus(); // Atualiza status final
 }
 /*======================================================================*/
 /*                           ENCODER / CONFIG                           */
@@ -533,13 +549,22 @@ void updateDisplayData() {
   tft.setTextSize(1);
   tft.setTextDatum(TL_DATUM);
 
-  int xLabel = 5, xValue = 120, xBar = 170;
-  int barW = 60, barH = 10, yStart = 10, lineH = 15;
+  // Margens e posicionamento ajustados
+  int xLabel = 10;
+  int xValue = 125;
+  int xBar = 175;
+  int barW = 60, barH = 10;
+  
+  // Ajuste vertical (valores reduzidos para subir o conteúdo)
+  int yStart = 8;       // Reduzido de 12 para 8
+  int lineH = 14;       // Reduzido de 15 para 14
+  int sectionSpacing = 8; // Espaço entre seções
 
   const char* labels[4] = {"STATE", "DIR", "SPEED", ".DEC"};
   uint8_t vals[4] = {dmxEnable, dmxDirection, dmxSpeed, dmxTenths};
   uint16_t colors[4] = {TFT_CYAN, TFT_MAGENTA, TFT_ORANGE, TFT_YELLOW};
 
+  // DMX Channels
   for (int i = 0; i < 4; ++i) {
     int y = yStart + i * lineH;
     tft.setCursor(xLabel, y);
@@ -552,40 +577,60 @@ void updateDisplayData() {
     tft.drawRect(xBar, y + 2, barW, barH, TFT_DARKGREY);
   }
 
-  int modY = yStart + 4 * lineH + 10;
-  float dsp = vfd.getMotorSpeed() / 10.0f;
-  if (vfd.getMotorDirection() == 1 && vfd.getMotorSpeed() > 32767)
-    dsp = ((int16_t)(65535 - vfd.getMotorSpeed() + 1)) / -10.0f;
+  // Motor Status (subido 4 pixels)
+  int modY = yStart + 4 * lineH + sectionSpacing - 4; // Ajuste para subir
+  
+  float motorSpeedHz = 0.0;
+  uint16_t rawSpeed = vfd.getMotorSpeed();
+  bool isReverse = (vfd.getMotorDirection() == 1);
+  
+  if (isReverse && rawSpeed > 32767) {
+    motorSpeedHz = ((int16_t)(65535 - rawSpeed + 1)) / -10.0f;
+  } else {
+    motorSpeedHz = rawSpeed / 10.0f;
+    if (isReverse) motorSpeedHz = -motorSpeedHz;
+  }
 
   tft.setCursor(xLabel, modY);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.print("Motor: ");
-  bool running = (vfd.getMotorStatus() & 0x004F) == STATE_OPERATION_ENABLED;
-  tft.setTextColor(running ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.println(running ? "ON" : "OFF");
+  tft.setTextColor((vfd.getMotorStatus() & 0x004F) == STATE_OPERATION_ENABLED ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.println((vfd.getMotorStatus() & 0x004F) == STATE_OPERATION_ENABLED ? "RUN" : "STOP");
 
   tft.setCursor(xValue, modY);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.printf("Speed: %.1f Hz", abs(dsp));
+  tft.printf("Speed: %s%.1f Hz", (motorSpeedHz < 0) ? "-" : "", abs(motorSpeedHz));
 
-  int r = 4, ySt = modY + 25;
-  tft.setCursor(xLabel, ySt - 8);
+  // Connection Status (subido 4 pixels)
+  int connY = modY + lineH + 2; // Reduzido o espaçamento
+  int r = 3; // Raio menor dos círculos
+  tft.setCursor(xLabel, connY);
   tft.print("DMX");
-  tft.fillCircle(xLabel + 72, ySt - 2, r, dmxOnline ? TFT_GREEN : TFT_RED);
+  tft.fillCircle(xLabel + 72, connY + 6, r, dmxOnline ? TFT_GREEN : TFT_RED);
 
-  tft.setCursor(xValue, ySt - 8);
+  tft.setCursor(xValue, connY);
   tft.print("MODBUS");
-  tft.fillCircle(xValue + 72, ySt - 2, r,   vfd.verifyModbusConnection() != 0 ? TFT_GREEN : TFT_RED);
+  tft.fillCircle(xValue + 72, connY + 6, r, vfd.verifyModbusConnection() ? TFT_GREEN : TFT_RED);
 
-  // Inverter status
-  int inverterY = ySt + 5;  // 20px abaixo dos status de DMX e MODBUS
-  tft.setCursor(xLabel, inverterY);
+  // Inverter Model (subido 4 pixels)
+  int invY = connY + lineH - 2; // Reduzido o espaçamento
+  tft.setCursor(xLabel, invY);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.print("Inverter Model:");
-  tft.setCursor(xLabel + 115, inverterY);
+  tft.print("Inverter:");
+  tft.setCursor(xValue - 10, invY);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.print(brandNames[inverterBrand]);
+
+  // Error Display (com posição garantida)
+  uint16_t errors = vfd.getMotorErrors();
+  if (errors != 0) {
+    int errY = invY + lineH - 2; // Posição ajustada
+    tft.setCursor(xLabel, errY);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.printf("Error: 0x%04X", errors);
+  }
 }
+
 // =============================================
 // FUNÇÕES CONFIGURAÇÕES SALVAS E LIDAS NA EEPROM
 // =============================================

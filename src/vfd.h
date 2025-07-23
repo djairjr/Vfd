@@ -16,17 +16,18 @@
 #define CMD_DISABLE_OPERATION  0x0007
 #define CMD_RUN_FORWARD      0x000F
 #define CMD_RUN_REVERSE      0x080F
+#define MODBUS_RESPONSE_TIMEOUT 2000
 
 class VFD {
 public:
   VFD(ModbusMaster* node, uint8_t address = 1);
-  virtual bool setMotorSpeed(uint16_t speed) = 0;
+  virtual bool setMotorSpeed(uint16_t speed) = 0; // Unsigned uint16_t
   virtual bool setMotorDirection(uint16_t direction) = 0;
   virtual bool sendCommandWithRetry(uint16_t command) = 0;
   virtual void readFrequencyLimits() = 0;
   virtual void readMotorStatus() = 0;
   
-    // Utility helpers (shared by all subclasses)
+  // Utility helpers (shared by all subclasses)
   virtual void checkModbusAddress();
   bool verifyModbusConnection();
   bool resetFault();

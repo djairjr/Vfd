@@ -454,6 +454,7 @@ void processDMXCommands() {
         break;
     }
   }
+  vfd.readMotorStatus(); // update motor status
 }
 /*======================================================================*/
 /*                           ENCODER / CONFIG                           */
